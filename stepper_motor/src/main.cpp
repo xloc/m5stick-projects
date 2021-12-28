@@ -2,38 +2,58 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 
-#include "irtx.h"
+#include <TMCStepper.h>
 
 /// this contains `const char*` variables [ssid] and [password] for wifi
 #include "secret.h"
 
+class TMC2020_Config{
+    const size_t PIN_RX = 63;
+    const size_t PIN_TX = 40;
+    const uint8_t UART_ADDRESS = 0b00;
+
+    const float R_SENSE = 0.11f; 
+        // Match to your driver
+        // SilentStepStick series use 0.11
+        // UltiMachine Einsy and Archim2 boards use 0.2
+        // Panucatt BSD2660 uses 0.1
+        // Watterott TMC5160 uses 0.075
+
+    Stream &SERIAL_PORT = Serial1;
+};
+
+void motor_init() {
+    auto &motor_serial = Serial1;
+    motor_serial.begin(115200, SERIAL_8N1, 0, 26); 
+    // baud, config, rx_pin, tx_pin
+
+    TMC2209Stepper motor(&Serial1, 0.11f, 0b00); 
+    // Stream *, R_sense, address
+
+    motor.begin();
+    motor.toff(5);                 // Enables driver in software
+    // off time setting controls duration of slow decay phase
+    // N_clk = 24 + 32 * TOFF
+    motor.rms_current(600);        // Set motor RMS current
+    motor.microsteps(16);          // Set microsteps to 1/16th
+
+    //driver.en_pwm_mode(true);       // Toggle stealthChop on TMC2130/2160/5130/5160
+    //driver.en_spreadCycle(false);   // Toggle spreadCycle on TMC2208/2209/2224
+    motor.pwm_autoscale(true);     // Needed for stealthChop
+
+}
+
+#define SERIAL_PORT Serial1 // TMC2208/TMC2224 HardwareSerial port
+#define DRIVER_ADDRESS 0b00 // TMC2209 Driver address according to MS1 and MS2
+
+#define R_SENSE 0.11f // Match to your driver
+                      // SilentStepStick series use 0.11
+                      // UltiMachine Einsy and Archim2 boards use 0.2
+                      // Panucatt BSD2660 uses 0.1
+                      // Watterott TMC5160 uses 0.075
+
 auto &lcd = M5.Lcd;
 AsyncWebServer server(80);
-
-enum RCCode {
-    RC_CODE_ON = 0, 
-    RC_CODE_OFF, 
-    RC_CODE_DIM, 
-    RC_CODE_BRIGHTEN, 
-    RC_CODE_WARM, 
-    RC_CODE_NATURAL, 
-    RC_CODE_MAX
-};
-
-struct irtx_code_item
-{
-    const uint8_t code;
-    char const *name;
-};
-
-const struct irtx_code_item rc_codes[] = {
-    [RC_CODE_ON] = {.code = 0x03, .name = "on"},
-    [RC_CODE_OFF] = {.code = 0x02, .name = "off"},
-    [RC_CODE_DIM] = {.code = 0x01, .name = "dim"},
-    [RC_CODE_BRIGHTEN] = {.code = 0x00, .name = "brighten"},
-    [RC_CODE_WARM] = {.code = 0x16, .name = "warm"},
-    [RC_CODE_NATURAL] = {.code = 0x10, .name = "natural"},
-};
 
 
 void network_set_routes();
@@ -64,70 +84,7 @@ void network_set_routes() {
     typedef AsyncWebServerRequest Req;
 
     server.on("/", HTTP_GET, [](Req *request){
-        request->send(200, "text/plain", "ESP32 server for controlling LED stripe via IR");
-    });
-
-    server.onNotFound([](Req *request){
-        request->send(404, "text/plain", "Not found");
-    });
-
-    server.on("/on", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_ON].code);
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.on("/off", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_OFF].code);
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.on("/dim", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_DIM].code);
-        request->send(200, "text/plain", "OK");
-    });    
-
-    server.on("/brighten", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_BRIGHTEN].code);
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.on("/warm", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_WARM].code);
-        request->send(200, "text/plain", "OK");
-    });
-
-    server.on("/natural", HTTP_GET, [](Req *request){
-        irtx_transmit(rc_codes[RC_CODE_NATURAL].code);
-        request->send(200, "text/plain", "OK");
-    });  
-
-
-    server.on("/battery", HTTP_GET, [](Req *request){
-        auto &axp = M5.Axp;
-        float bat_v = axp.GetBatVoltage();
-        float bat_i = axp.GetBatCurrent();
-        float bat_p = axp.GetBatPower();
-        
-        static char buffer[100];
-        sprintf(buffer, "battery info\n"
-            "voltage: %7.2fV\ncurrent: %7.2fmA\npower  : %7.2fmW\n", 
-            bat_v, bat_i, bat_p);
-        request->send(200, "text/plain", buffer);
-    });  
-
-    server.on("/coulomb", HTTP_GET, [](Req *request){
-        auto &axp = M5.Axp;
-        uint32_t coulomb_charge = axp.GetCoulombchargeData();
-        uint32_t coulomb_discharge = axp.GetCoulombdischargeData();
-        uint32_t coulomb_data = axp.GetCoulombData();
-        uint32_t coulomb_input = axp.GetBatCoulombInput();
-        uint32_t coulomb_output = axp.GetBatCoulombOut();
-
-        static char buffer[120];
-        sprintf(buffer, "Coulomb info:\n" 
-            "charge=%d\ndischarge=%d\ndata:%d\ninput=%d\noutput=%d\n", 
-            coulomb_charge, coulomb_discharge, coulomb_data, coulomb_input, coulomb_output);
-        request->send(200, "text/plain", buffer);
+        request->send(200, "text/plain", "Hello");
     });
 }
 
@@ -141,9 +98,9 @@ void setup()
     lcd.setTextPadding(5);
     lcd.setCursor(5, 2);
 
-    irtx_init();
-
     network_init();
+
+
 }
 
 void loop()
